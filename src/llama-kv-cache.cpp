@@ -529,8 +529,6 @@ int32_t llama_kv_cache_unified::find_slot(const llama_ubatch & ubatch) const {
         head_cur = 0;
     }
 
-    // otherwise, one cell per token.
-
     if (n_tokens > cells.size()) {
         LLAMA_LOG_ERROR("%s: n_tokens = %d > size = %u\n", __func__, n_tokens, cells.size());
         return -1;
@@ -2310,21 +2308,12 @@ bool llama_kv_cache_recurrent::prepare(const std::vector<llama_ubatch> & ubatche
 
     bool success = true;
 
-    // TODO: here we have to verify that all ubatches can fit in the cells
-    //       however, the current implementation is broken because it relies on s_copy() and s_mask() to update the cells
-    //         during the compute of each ubatch. to reproduce, uncomment the following loop and run:
-    //
-    //           $ llama-parallel -m ./mamba-130m/ggml-model-f16.gguf -np 5 -ns 8
-    //
-    //       recovery from failures when the batch does not fit in the KV cache will not work correctly until this is fixed
-    //
-    GGML_UNUSED(ubatches);
-    //for (const auto & ubatch : ubatches) {
-    //    if (!find_slot(ubatch)) {
-    //        success = false;
-    //        break;
-    //    }
-    //}
+    for (const auto & ubatch : ubatches) {
+        if (!find_slot(ubatch)) {
+            success = false;
+            break;
+        }
+    }
 
     // restore the original state
     cells = std::move(org_cells);
@@ -2514,6 +2503,18 @@ bool llama_kv_cache_recurrent::find_slot(const llama_ubatch & ubatch) {
         }
     }
 
+    // Find first to-be-cleared cell
+    rs_z = -1;
+    for (int i = min; i <= max; ++i) {
+        if (rs_z < 0 && cells[i].src == -1) {
+            rs_z = i;
+        }
+        // Stage the source ids for all used cells to allow correct seq_* behavior
+        // and still make these values available when setting the inputs
+        cells[i].src0 = cells[i].src;
+        cells[i].src = i;
+    }
+
     // allow getting the range of used cells, from head to head + n
     head = min;
     n    = max - min + 1;
@@ -2525,47 +2526,8 @@ bool llama_kv_cache_recurrent::find_slot(const llama_ubatch & ubatch) {
 }
 
 bool llama_kv_cache_recurrent::get_can_shift() const {
-    return false;
-}
-
-int32_t llama_kv_cache_recurrent::s_copy(int i) const {
-    const uint32_t cell_id = i + head;
-
-    //////////////////////////////////////////////
-    // TODO: this should not mutate the KV cache !
-    kv_cell & cell = const_cast<kv_cell &>(cells[cell_id]);
-
-    // prevent out-of-bound sources
-    if (cell.src < 0 || (uint32_t) cell.src >= size) {
-        cell.src = cell_id;
-    }
-
-    int32_t res = cell.src;
-
-    // TODO: do not mutate the KV cache
-    // ensure copy only happens once
-    if (cell.src != (int32_t) cell_id) {
-        cell.src = cell_id;
-    }
-
-    return res;
-}
-
-float llama_kv_cache_recurrent::s_mask(int i) const {
-    const uint32_t cell_id = i + head;
-
-    //////////////////////////////////////////////
-    // TODO: this should not mutate the KV cache !
-    kv_cell & cell = const_cast<kv_cell &>(cells[cell_id]);
-
-    float res = (float) (cell.src >= 0);
-
-    // only clear once
-    if (cell.src < 0) {
-        cell.src = cell_id;
-    }
-
-    return res;
+    // shifting the pos is trivial for recurrent models
+    return true;
 }
 
 size_t llama_kv_cache_recurrent::total_size() const {
