@@ -242,23 +242,7 @@ void llm_graph_input_s_copy::set_input(const llama_ubatch * ubatch) {
 
         // assuming copy destinations ALWAYS happen ONLY on the cells between head and head+n
         for (uint32_t i = 0; i < n_kv; ++i) {
-            const uint32_t  cell_id = i + kv_self->head;
-
-            const auto & kv_cell = kv_self->cells[cell_id];
-
-            int32_t src = kv_cell.src0;
-
-            // prevent out-of-bound sources
-            if (src < 0) {
-                GGML_ASSERT(kv_self->rs_z >= 0); // Need a valid zero-ed cell as a source
-                src = kv_self->rs_z;
-            }
-            if ((uint32_t) src >= kv_self->size) {
-                // ignore out-of-bound sources
-                src = cell_id;
-            }
-
-            data[i] = src;
+            data[i] = kv_self->cells[i + kv_self->head].src0;
         }
     }
 }
@@ -1442,7 +1426,7 @@ ggml_tensor * llm_graph_context::build_recurrent_state(
     ggml_tensor * state_zero = ggml_view_1d(ctx0, states, n_state*(rs_zero >= 0), rs_zero*states->nb[1]*(rs_zero >= 0));
     ggml_build_forward_expand(gf, ggml_scale_inplace(ctx0, state_zero, 0));
 
-    // copy states which won't be changed further (between n_seqs and n_kv)
+    // copy extra states which won't be changed further (between n_seqs and n_kv)
     ggml_tensor * states_extra = ggml_get_rows(ctx0, states, ggml_view_1d(ctx0, state_copy, n_kv - n_seqs, n_seqs*state_copy->nb[0]));
     ggml_build_forward_expand(gf,
         ggml_cpy(ctx0,
@@ -1452,10 +1436,8 @@ ggml_tensor * llm_graph_context::build_recurrent_state(
     if (!avoid_copies) {
         // copy states
         // NOTE: assuming the copy destinations are ALL contained between kv_head and kv_head + n_kv
-        // this shrinks the tensors's ne[1] to n_kv
+        // this shrinks the tensors's ne[1] to n_seqs
         states = ggml_get_rows(ctx0, states, ggml_view_1d(ctx0, state_copy, n_seqs, 0));
-        // the part of the states that will be used and modified
-        states = ggml_view_2d(ctx0, states, n_state, n_seqs, states->nb[1], 0);
     }
 
     return states;

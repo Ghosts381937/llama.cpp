@@ -2337,17 +2337,17 @@ void llama_kv_cache_recurrent::defrag_sched(float thold) {
 void llama_kv_cache_recurrent::set_full() {
     n = size;
     head = 0;
+    rs_z = 0;
 }
 
 bool llama_kv_cache_recurrent::find_slot(const llama_ubatch & ubatch) {
-    const uint32_t n_tokens = ubatch.n_tokens;
-    const uint32_t n_seqs   = ubatch.n_seqs;
+    const uint32_t n_seqs = ubatch.n_seqs;
 
     const uint32_t n_seq_tokens = ubatch.n_seq_tokens;
 
     // if we have enough unused cells before the current head ->
     //   better to start searching from the beginning of the cache, hoping to fill it
-    if (head > used + 2*n_tokens) {
+    if (head > used + 2*n_seqs) {
         head = 0;
     }
 
@@ -2443,16 +2443,16 @@ bool llama_kv_cache_recurrent::find_slot(const llama_ubatch & ubatch) {
                 empty_cell.src = orig_cell.src;
                 orig_cell.seq_id.erase(seq_id);
                 empty_cell.seq_id.insert(seq_id); // will be overwritten
+                GGML_ASSERT(!orig_cell.is_empty()); // has at least one remaining seq_id
             }
             seq_meta.tail = next_empty_cell;
             // find next empty cell
             if (s + 1 < n_seqs) {
-                next_empty_cell += 1;
                 for (uint32_t i = 0; i < size; ++i) {
+                    next_empty_cell += 1;
                     if (next_empty_cell >= size) { next_empty_cell -= size; }
                     kv_cell & cell = cells[next_empty_cell];
                     if (cell.is_empty()) { break; }
-                    next_empty_cell += 1;
                 }
             }
         }
@@ -2472,12 +2472,14 @@ bool llama_kv_cache_recurrent::find_slot(const llama_ubatch & ubatch) {
             std::swap(dst_cell.src, src_cell.src);
             std::swap(dst_cell.seq_id, src_cell.seq_id);
 
-            // swap tails (assuming they NEVER overlap)
-            for (const llama_seq_id seq_id : src_cell.seq_id) {
-                cells[seq_id].tail = src_id;
-            }
-            for (const llama_seq_id seq_id : dst_cell.seq_id) {
-                cells[seq_id].tail = dst_id;
+            // swap tails
+            for (uint32_t i = 0; i < size; ++i) {
+                int32_t & tail = cells[i].tail;
+                if (tail == src_id) {
+                    tail = dst_id;
+                } else if (tail == dst_id) {
+                    tail = src_id;
+                }
             }
         }
     }
@@ -2506,13 +2508,18 @@ bool llama_kv_cache_recurrent::find_slot(const llama_ubatch & ubatch) {
     // Find first to-be-cleared cell
     rs_z = -1;
     for (int i = min; i <= max; ++i) {
-        if (rs_z < 0 && cells[i].src == -1) {
-            rs_z = i;
+        if (cells[i].src == -1) {
+            if (rs_z < 0) {
+                rs_z = i;
+            }
+
+            cells[i].src0 = rs_z;
+        } else {
+            // Stage the source ids for all used cells to allow correct seq_* behavior
+            // and still make these values available when setting the inputs
+            cells[i].src0 = cells[i].src;
         }
-        // Stage the source ids for all used cells to allow correct seq_* behavior
-        // and still make these values available when setting the inputs
-        cells[i].src0 = cells[i].src;
-        cells[i].src = i;
+        cells[i].src = i; // avoid moving or clearing twice
     }
 
     // allow getting the range of used cells, from head to head + n
